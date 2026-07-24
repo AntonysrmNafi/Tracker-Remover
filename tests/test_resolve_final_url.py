@@ -6,6 +6,20 @@ import pytest
 import main
 
 
+def test_headers_for_facebook_host_uses_crawler_ua():
+    headers = main._headers_for("https://www.facebook.com/share/v/1BULkwnpQA/")
+    assert headers["User-Agent"] == main.FACEBOOK_CRAWLER_HEADERS["User-Agent"]
+
+
+def test_headers_for_facebook_subdomain_uses_crawler_ua():
+    headers = main._headers_for("https://m.facebook.com/reel/123/")
+    assert headers["User-Agent"] == main.FACEBOOK_CRAWLER_HEADERS["User-Agent"]
+
+
+def test_headers_for_non_facebook_host_uses_default():
+    assert main._headers_for("https://www.youtube.com/watch?v=abc") == {}
+
+
 @pytest.fixture
 def bypass_dns(monkeypatch):
     """Named hosts can't be resolved from this test sandbox, so pretend any
