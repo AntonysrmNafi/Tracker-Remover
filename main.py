@@ -68,6 +68,7 @@ PLATFORM_RULES = [
         frozenset({
             "fbclid", "mibextid", "__tn__", "refsrc", "source", "extid",
             "paipv", "eav", "notif_id", "notif_t", "ref_component", "actorid", "hrc",
+            "rdid", "share_url",
         }),
         True,
     ),
@@ -202,16 +203,51 @@ class UnsafeURLError(Exception):
     """Raised when a URL (or one of its redirect hops) is not safe to fetch."""
 
 
-MAX_REDIRECTS = 5
+MAX_REDIRECTS = 6
 RESOLVE_TIMEOUT = 8.0
 ALLOWED_SCHEMES = {"http", "https"}
 REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+CANONICAL_URL_SCAN_LIMIT = 300_000  # bytes; only the <head> is needed, this is a generous cap
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
+
+# Some platforms (notably Facebook's /share/v/... and /share/r/... links) don't
+# always send a normal HTTP redirect to automated clients; instead they serve
+# an HTML page whose <meta property="og:url" ...> or <link rel="canonical" ...>
+# tag holds the real destination URL. These regexes find that URL regardless
+# of attribute order, without a full HTML parser.
+OG_URL_RE = re.compile(
+    r'<meta\b(?=[^>]*\bproperty=["\']og:url["\'])(?=[^>]*\bcontent=["\']([^"\']+)["\'])[^>]*>',
+    re.IGNORECASE,
+)
+CANONICAL_LINK_RE = re.compile(
+    r'<link\b(?=[^>]*\brel=["\']canonical["\'])(?=[^>]*\bhref=["\']([^"\']+)["\'])[^>]*>',
+    re.IGNORECASE,
+)
+
+
+async def _extract_canonical_url(response: httpx.Response) -> str | None:
+    """Read up to CANONICAL_URL_SCAN_LIMIT bytes of an HTML response looking
+    for an og:url or canonical link tag. Capped so a huge/slow response can't
+    be used to exhaust memory or bandwidth."""
+    collected = bytearray()
+    try:
+        async for chunk in response.aiter_bytes():
+            collected.extend(chunk)
+            if len(collected) >= CANONICAL_URL_SCAN_LIMIT:
+                break
+    except httpx.HTTPError:
+        return None
+
+    text = collected.decode("utf-8", errors="ignore")
+    match = OG_URL_RE.search(text) or CANONICAL_LINK_RE.search(text)
+    return match.group(1) if match else None
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
@@ -253,10 +289,15 @@ async def _assert_url_is_safe(url: str) -> None:
     await _assert_host_is_public(parsed.host)
 
 
-async def resolve_final_url(url: str) -> str:
+async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None = None) -> str:
     """Follow redirects one hop at a time (SSRF-validated at every hop) and
     return the final destination URL. Falls back to the last known-safe URL
-    if anything looks unsafe, times out, or otherwise fails."""
+    if anything looks unsafe, times out, or otherwise fails.
+
+    `transport` is only used by tests to simulate HTTP responses without
+    making real network calls; production code always uses the default
+    (real) transport.
+    """
     current = url
     last_safe = url
     try:
@@ -264,6 +305,7 @@ async def resolve_final_url(url: str) -> str:
             follow_redirects=False,
             timeout=RESOLVE_TIMEOUT,
             headers=REQUEST_HEADERS,
+            transport=transport,
         ) as client:
             for _ in range(MAX_REDIRECTS + 1):
                 await _assert_url_is_safe(current)
@@ -273,6 +315,22 @@ async def resolve_final_url(url: str) -> str:
                     if response.status_code in REDIRECT_STATUS_CODES and location:
                         current = str(httpx.URL(current).join(location))
                         continue
+
+                    canonical = None
+                    content_type = response.headers.get("content-type", "")
+                    if response.status_code == 200 and "text/html" in content_type.lower():
+                        canonical = await _extract_canonical_url(response)
+
+                    if canonical:
+                        candidate = str(httpx.URL(current).join(canonical))
+                        if candidate != current:
+                            try:
+                                await _assert_url_is_safe(candidate)
+                            except UnsafeURLError:
+                                return str(response.url)
+                            current = candidate
+                            continue
+
                     return str(response.url)
     except UnsafeURLError as exc:
         logger.warning("Blocked unsafe URL while resolving %s: %s", url, exc)
