@@ -155,33 +155,50 @@ def strip_trailing_punctuation(url: str) -> str:
     return url
 
 
-def clean_url(url: str) -> str:
+def _clean_url_internal(url: str) -> tuple[str, list[str]]:
+    """Returns (cleaned_url, removed_param_names). If the URL can't be
+    parsed, returns it unchanged with an empty removed-params list."""
     try:
         parsed = urlsplit(url)
     except ValueError:
-        return url
+        return url, []
 
     if not parsed.scheme or not parsed.netloc:
-        return url
+        return url, []
 
     domain = parsed.netloc.lower().removeprefix("www.")
     domain_extra_params, strip_fragment = find_platform_rule(domain)
 
     cleaned_params = []
+    removed_params: list[str] = []
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
         key_lower = key.lower()
-        if key_lower in GENERIC_TRACKING_PARAMS_EXACT:
-            continue
-        if key_lower in domain_extra_params:
-            continue
-        if any(key_lower.startswith(prefix) for prefix in GENERIC_TRACKING_PARAMS_PREFIX):
+        if (
+            key_lower in GENERIC_TRACKING_PARAMS_EXACT
+            or key_lower in domain_extra_params
+            or any(key_lower.startswith(prefix) for prefix in GENERIC_TRACKING_PARAMS_PREFIX)
+        ):
+            removed_params.append(key)
             continue
         cleaned_params.append((key, value))
+
+    if strip_fragment and parsed.fragment:
+        removed_params.append("fragment")
 
     new_query = urlencode(cleaned_params, doseq=True)
     fragment = "" if strip_fragment else parsed.fragment
 
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, fragment))
+    cleaned = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, fragment))
+    return cleaned, removed_params
+
+
+def clean_url(url: str) -> str:
+    cleaned, _removed_params = _clean_url_internal(url)
+    return cleaned
+
+
+def clean_url_with_trackers(url: str) -> tuple[str, list[str]]:
+    return _clean_url_internal(url)
 
 
 # ---------------------------------------------------------------------------
@@ -217,17 +234,37 @@ REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Some platforms (notably Facebook's /share/v/... and /share/r/... links) don't
-# always send a normal HTTP redirect to automated clients; instead they serve
-# an HTML page whose <meta property="og:url" ...> or <link rel="canonical" ...>
-# tag holds the real destination URL. These regexes find that URL regardless
-# of attribute order, without a full HTML parser.
+# Facebook's own /share/v/... and /share/r/... links frequently don't send a
+# normal HTTP redirect (or a usable og:url tag) to generic bot traffic, but
+# they do to known link-preview crawlers (this is how link previews work on
+# Messenger, WhatsApp, Slack, Twitter, etc.). Impersonating that crawler UA
+# for facebook.com hosts is a standard, widely used technique to reliably get
+# the real og:url back instead of an interstitial page.
+FACEBOOK_HOST_SUFFIXES = ("facebook.com", "fb.watch", "fb.com", "fb.me", "messenger.com", "m.me")
+FACEBOOK_CRAWLER_HEADERS = {
+    "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Accept": "*/*",
+}
+
+
+def _headers_for(url: str) -> dict:
+    host = (httpx.URL(url).host or "").lower()
+    if any(host == suffix or host.endswith("." + suffix) for suffix in FACEBOOK_HOST_SUFFIXES):
+        return FACEBOOK_CRAWLER_HEADERS
+    return {}
+
+
+# Some platforms don't send a normal HTTP redirect to automated clients;
+# instead they serve an HTML page whose <meta property="og:url" ...> or
+# <link rel="canonical" ...> tag holds the real destination URL. These
+# regexes find that URL regardless of attribute order or surrounding
+# whitespace, without needing a full HTML parser.
 OG_URL_RE = re.compile(
-    r'<meta\b(?=[^>]*\bproperty=["\']og:url["\'])(?=[^>]*\bcontent=["\']([^"\']+)["\'])[^>]*>',
+    r'<meta\b(?=[^>]*\bproperty\s*=\s*["\']og:url["\'])(?=[^>]*\bcontent\s*=\s*["\']([^"\']+)["\'])[^>]*>',
     re.IGNORECASE,
 )
 CANONICAL_LINK_RE = re.compile(
-    r'<link\b(?=[^>]*\brel=["\']canonical["\'])(?=[^>]*\bhref=["\']([^"\']+)["\'])[^>]*>',
+    r'<link\b(?=[^>]*\brel\s*=\s*["\']canonical["\'])(?=[^>]*\bhref\s*=\s*["\']([^"\']+)["\'])[^>]*>',
     re.IGNORECASE,
 )
 
@@ -310,7 +347,7 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
             for _ in range(MAX_REDIRECTS + 1):
                 await _assert_url_is_safe(current)
                 last_safe = current
-                async with client.stream("GET", current) as response:
+                async with client.stream("GET", current, headers=_headers_for(current)) as response:
                     location = response.headers.get("location")
                     if response.status_code in REDIRECT_STATUS_CODES and location:
                         current = str(httpx.URL(current).join(location))
@@ -318,7 +355,7 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
 
                     canonical = None
                     content_type = response.headers.get("content-type", "")
-                    if response.status_code == 200 and "text/html" in content_type.lower():
+                    if "text/html" in content_type.lower():
                         canonical = await _extract_canonical_url(response)
 
                     if canonical:
@@ -331,6 +368,11 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
                             current = candidate
                             continue
 
+                    if str(response.url) == url:
+                        logger.info(
+                            "No redirect or canonical URL found for %s (status=%s, content-type=%s)",
+                            url, response.status_code, content_type,
+                        )
                     return str(response.url)
     except UnsafeURLError as exc:
         logger.warning("Blocked unsafe URL while resolving %s: %s", url, exc)
@@ -341,10 +383,45 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
     return last_safe
 
 
-async def process_url(raw_url: str) -> str:
-    url = strip_trailing_punctuation(raw_url)
-    resolved = await resolve_final_url(url)
-    return clean_url(resolved)
+async def process_url(raw_url: str) -> dict:
+    """Resolve + clean one URL and report what was done to it.
+
+    Returns a dict with:
+      original         the exact text the user sent (unmodified)
+      cleaned           the resolved, tracker-free URL
+      removed_params    tracking query params (and "fragment" if dropped)
+      was_redirected    True if the link was a short/redirect link that had
+                         to be followed to find the real destination
+    """
+    stripped = strip_trailing_punctuation(raw_url)
+    resolved = await resolve_final_url(stripped)
+    cleaned, removed_params = clean_url_with_trackers(resolved)
+    return {
+        "original": raw_url,
+        "cleaned": cleaned,
+        "removed_params": removed_params,
+        "was_redirected": resolved != stripped,
+    }
+
+
+def format_link_block(
+    original: str, cleaned: str, removed_params: list[str], was_redirected: bool
+) -> str:
+    items = list(dict.fromkeys(removed_params))  # dedupe, keep first-seen order
+    if was_redirected:
+        items.append("Short URL (resolved)")
+    tracker_text = ", ".join(items) if items else "None found"
+
+    return (
+        f"Your Link : {original}\n"
+        f"Clean & Secure Link : {cleaned}\n"
+        f"Tracker : {tracker_text}"
+    )
+
+
+def format_reply(results: list[dict]) -> str:
+    return "\n\n".join(format_link_block(**result) for result in results)
+
 
 
 # ---------------------------------------------------------------------------
@@ -405,14 +482,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    cleaned_urls = await asyncio.gather(*(process_url(u) for u in raw_urls))
+    results = await asyncio.gather(*(process_url(u) for u in raw_urls))
+    reply = format_reply(results)
 
-    if len(cleaned_urls) == 1:
-        reply = cleaned_urls[0]
-    else:
-        reply = "\n".join(f"{i}. {u}" for i, u in enumerate(cleaned_urls, start=1))
-
-    await message.reply_text(reply, disable_web_page_preview=False)
+    await message.reply_text(reply, disable_web_page_preview=True)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
