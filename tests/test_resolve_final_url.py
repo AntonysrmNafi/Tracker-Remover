@@ -20,6 +20,36 @@ def test_headers_for_non_facebook_host_uses_default():
     assert main._headers_for("https://www.youtube.com/watch?v=abc") == {}
 
 
+def test_guard_keeps_resolved_url_when_it_has_a_real_path():
+    original = "https://lnkd.in/abc123"
+    resolved = "https://www.linkedin.com/posts/user_activity-123"
+    assert main._guard_against_authwall(original, resolved) == resolved
+
+
+def test_guard_falls_back_when_resolved_lands_on_bare_homepage():
+    original = "https://lnkd.in/abc123"
+    resolved = "https://www.linkedin.com/"
+    assert main._guard_against_authwall(original, resolved) == original
+
+
+def test_guard_falls_back_on_authwall_path():
+    original = "https://lnkd.in/abc123"
+    resolved = "https://www.linkedin.com/authwall?trk=abc&sessionRedirect=..."
+    assert main._guard_against_authwall(original, resolved) == original
+
+
+def test_guard_falls_back_on_login_path():
+    original = "https://lnkd.in/abc123"
+    resolved = "https://www.linkedin.com/login"
+    assert main._guard_against_authwall(original, resolved) == original
+
+
+def test_guard_allows_bare_homepage_when_original_had_no_path_either():
+    original = "https://lnkd.in/"
+    resolved = "https://www.linkedin.com/"
+    assert main._guard_against_authwall(original, resolved) == resolved
+
+
 @pytest.fixture
 def bypass_dns(monkeypatch):
     """Named hosts can't be resolved from this test sandbox, so pretend any
@@ -83,6 +113,21 @@ async def test_redirect_to_private_metadata_ip_is_blocked(bypass_dns):
 
     result = await main.resolve_final_url(public_url, transport=httpx.MockTransport(handler))
     assert result == public_url
+
+
+async def test_shortlink_hitting_authwall_falls_back_to_short_url(bypass_dns):
+    short_url = "https://lnkd.in/abc123"
+    authwall_url = "https://www.linkedin.com/authwall?trk=x&sessionRedirect=y"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == short_url:
+            return httpx.Response(302, headers={"location": authwall_url})
+        if str(request.url) == authwall_url:
+            return httpx.Response(200, headers={"content-type": "text/html"}, text="<html><body>Sign in</body></html>")
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    result = await main.resolve_final_url(short_url, transport=httpx.MockTransport(handler))
+    assert result == short_url
 
 
 async def test_end_to_end_process_url_cleans_after_resolving(bypass_dns):
