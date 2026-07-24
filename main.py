@@ -147,6 +147,41 @@ def find_platform_rule(domain: str):
     return frozenset(), False
 
 
+# ---------------------------------------------------------------------------
+# Only fetch a link over the network if it's actually a wrapper/shortener
+# that needs resolving. A full/direct link (e.g. a normal linkedin.com post
+# URL, a full instagram.com/reel/... URL) is already the real destination,
+# so it's cleaned in place without a network round trip. This also avoids a
+# real bug: fetching an already-direct link can hit a platform's login/
+# authwall page (LinkedIn does this for logged-out requests) and redirect to
+# a generic homepage, destroying the real path for no reason.
+# ---------------------------------------------------------------------------
+SHORTENER_DOMAINS = frozenset({
+    "bit.ly", "t.co", "lnkd.in", "vm.tiktok.com", "vt.tiktok.com",
+    "fb.watch", "fb.me", "goo.gl", "amzn.to", "pin.it", "redd.it",
+    "spotify.link",
+})
+
+
+def needs_resolution(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+
+    domain = parsed.netloc.lower().removeprefix("www.")
+    if domain in SHORTENER_DOMAINS or any(domain.endswith("." + d) for d in SHORTENER_DOMAINS):
+        return True
+
+    # Facebook's /share/v/... and /share/r/... paths are wrapper links even
+    # though they live on facebook.com itself; a direct facebook.com/reel/...
+    # or facebook.com/watch?v=... link does not need resolving.
+    if domain == "facebook.com" or domain.endswith(".facebook.com"):
+        return parsed.path.startswith("/share/")
+
+    return False
+
+
 def strip_trailing_punctuation(url: str) -> str:
     while url and url[-1] in TRAILING_CHARS:
         url = url[:-1]
@@ -326,6 +361,33 @@ async def _assert_url_is_safe(url: str) -> None:
     await _assert_host_is_public(parsed.host)
 
 
+# Landing on one of these after following a redirect/canonical chain almost
+# always means "you're not logged in" rather than "here's the content", e.g.
+# LinkedIn redirecting an unauthenticated request for a post to its homepage
+# or an authwall page. In that case the resolved URL is strictly worse than
+# what the user gave us, so we keep the original instead of the redirect.
+AUTHWALL_PATH_MARKERS = ("authwall", "checkpoint", "uas/login", "login", "signin", "consent")
+
+
+def _guard_against_authwall(original_url: str, resolved_url: str) -> str:
+    if resolved_url == original_url:
+        return resolved_url
+
+    original_path = urlsplit(original_url).path
+    if original_path in ("", "/"):
+        return resolved_url  # original had no real content path to protect
+
+    resolved_path = urlsplit(resolved_url).path.lower()
+    if resolved_path in ("", "/") or any(marker in resolved_path for marker in AUTHWALL_PATH_MARKERS):
+        logger.info(
+            "Resolved URL %s looks like a login/authwall page for %s, keeping the original",
+            resolved_url, original_url,
+        )
+        return original_url
+
+    return resolved_url
+
+
 async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None = None) -> str:
     """Follow redirects one hop at a time (SSRF-validated at every hop) and
     return the final destination URL. Falls back to the last known-safe URL
@@ -364,7 +426,7 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
                             try:
                                 await _assert_url_is_safe(candidate)
                             except UnsafeURLError:
-                                return str(response.url)
+                                return _guard_against_authwall(url, str(response.url))
                             current = candidate
                             continue
 
@@ -373,7 +435,7 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
                             "No redirect or canonical URL found for %s (status=%s, content-type=%s)",
                             url, response.status_code, content_type,
                         )
-                    return str(response.url)
+                    return _guard_against_authwall(url, str(response.url))
     except UnsafeURLError as exc:
         logger.warning("Blocked unsafe URL while resolving %s: %s", url, exc)
         return last_safe
@@ -394,7 +456,10 @@ async def process_url(raw_url: str) -> dict:
                          to be followed to find the real destination
     """
     stripped = strip_trailing_punctuation(raw_url)
-    resolved = await resolve_final_url(stripped)
+    if needs_resolution(stripped):
+        resolved = await resolve_final_url(stripped)
+    else:
+        resolved = stripped
     cleaned, removed_params = clean_url_with_trackers(resolved)
     return {
         "original": raw_url,
