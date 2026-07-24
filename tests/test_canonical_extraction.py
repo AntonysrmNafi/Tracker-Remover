@@ -1,3 +1,4 @@
+import main
 from main import CANONICAL_LINK_RE, OG_URL_RE
 
 
@@ -20,6 +21,20 @@ def test_og_url_regex_tolerates_whitespace_around_equals():
     match = OG_URL_RE.search(html)
     assert match is not None
     assert match.group(1) == "https://www.facebook.com/reel/123/"
+
+
+def test_meta_refresh_extracts_url():
+    html = '<meta http-equiv="refresh" content="0; url=https://www.facebook.com/reel/123/">'
+    match = main.META_REFRESH_RE.search(html)
+    assert match is not None
+    assert match.group(1) == "https://www.facebook.com/reel/123/"
+
+
+def test_json_escaped_url_extracts_and_unescapes():
+    html = '{"some_field":"x","url":"https:\\/\\/www.facebook.com\\/reel\\/123\\/","other":1}'
+    match = main.JSON_ESCAPED_URL_RE.search(html)
+    assert match is not None
+    assert match.group(1).replace("\\/", "/") == "https://www.facebook.com/reel/123/"
 
 
 def test_canonical_link_regex():
