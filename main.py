@@ -160,7 +160,53 @@ SHORTENER_DOMAINS = frozenset({
     "bit.ly", "t.co", "lnkd.in", "vm.tiktok.com", "vt.tiktok.com",
     "fb.watch", "fb.me", "goo.gl", "amzn.to", "pin.it", "redd.it",
     "spotify.link",
+    # General-purpose shorteners below. New ones launch constantly, so this
+    # curated list is just a fast-path; the bare-short-path heuristic further
+    # down is the real backstop for shorteners we've never seen before.
+    "tinyurl.com", "is.gd", "ow.ly", "buff.ly", "shorturl.at", "rebrand.ly",
+    "cutt.ly", "soo.gd", "tiny.cc", "rb.gy", "s.id", "bl.ink", "shrtco.de",
+    "v.gd", "qr.ae", "tr.im", "adf.ly", "tny.im", "x.co", "cli.gs",
+    "shorte.st", "po.st", "mcaf.ee", "ln.run", "git.io", "dub.sh", "t.ly",
+    "snip.ly", "0rz.tw", "urlz.fr", "hyperurl.co", "chilp.it", "kutt.it",
+    "gg.gg", "clck.ru", "u.to", "waa.ai", "zpr.io", "urlr.me", "shorturl.com",
+    "shorturl.gg", "tiny.one", "smallurl.co", "rotf.lu", "urlz.de",
 })
+
+# Real-world shorteners aren't a closed set (new ones launch all the time),
+# so alongside the curated list above we also treat "domain we don't
+# recognize + a single short random-looking path segment + no query string"
+# as a probable shortener and try to resolve it. Domains we already handle
+# explicitly (via PLATFORM_RULES) are excluded so this can't re-trigger the
+# LinkedIn-authwall-style bug on a platform we deliberately don't resolve.
+_RECOGNIZED_PLATFORM_DOMAINS = frozenset(
+    domain for domains, _params, _frag in PLATFORM_RULES for domain in domains
+)
+_GENERIC_SHORT_PATH_RE = re.compile(r"^/(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{4,12}/?$")
+
+
+def _looks_like_unknown_shortlink(url: str, domain: str) -> bool:
+    if domain in _RECOGNIZED_PLATFORM_DOMAINS:
+        return False
+    if any(domain.endswith("." + d) for d in _RECOGNIZED_PLATFORM_DOMAINS):
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.query:
+        return False
+    return bool(_GENERIC_SHORT_PATH_RE.match(parsed.path))
+
+
+def _is_known_shortener(domain: str, path: str) -> bool:
+    if domain in SHORTENER_DOMAINS or any(domain.endswith("." + d) for d in SHORTENER_DOMAINS):
+        return True
+    # Facebook's /share/v/... and /share/r/... paths are wrapper links even
+    # though they live on facebook.com itself; a direct facebook.com/reel/...
+    # or facebook.com/watch?v=... link does not need resolving.
+    if domain == "facebook.com" or domain.endswith(".facebook.com"):
+        return path.startswith("/share/")
+    return False
 
 
 def needs_resolution(url: str) -> bool:
@@ -170,16 +216,10 @@ def needs_resolution(url: str) -> bool:
         return False
 
     domain = parsed.netloc.lower().removeprefix("www.")
-    if domain in SHORTENER_DOMAINS or any(domain.endswith("." + d) for d in SHORTENER_DOMAINS):
+    if _is_known_shortener(domain, parsed.path):
         return True
 
-    # Facebook's /share/v/... and /share/r/... paths are wrapper links even
-    # though they live on facebook.com itself; a direct facebook.com/reel/...
-    # or facebook.com/watch?v=... link does not need resolving.
-    if domain == "facebook.com" or domain.endswith(".facebook.com"):
-        return parsed.path.startswith("/share/")
-
-    return False
+    return _looks_like_unknown_shortlink(url, domain)
 
 
 def strip_trailing_punctuation(url: str) -> str:
@@ -481,12 +521,20 @@ async def process_url(raw_url: str) -> dict:
       removed_params        tracking query params (and "fragment" if dropped)
       was_redirected        True if the link was a short/redirect link that
                              was successfully followed to a different URL
-      attempted_resolution  True if this looked like a short/wrapper link we
-                             tried to resolve, whether or not it succeeded
+      attempted_resolution  True if this was a *confirmed* shortener (known
+                             domain, or Facebook's /share/ wrapper) we tried
+                             to resolve, whether or not it succeeded. A link
+                             that only matched the generic short-path
+                             heuristic and turned out to be a normal direct
+                             link does not set this, so it doesn't get an
+                             unnecessary "could not verify" message.
     """
     stripped = strip_trailing_punctuation(raw_url)
-    attempted_resolution = needs_resolution(stripped)
-    if attempted_resolution:
+    parsed = urlsplit(stripped)
+    domain = parsed.netloc.lower().removeprefix("www.")
+    confirmed_shortener = _is_known_shortener(domain, parsed.path)
+
+    if confirmed_shortener or _looks_like_unknown_shortlink(stripped, domain):
         resolved = await resolve_final_url(stripped)
     else:
         resolved = stripped
@@ -496,7 +544,7 @@ async def process_url(raw_url: str) -> dict:
         "cleaned": cleaned,
         "removed_params": removed_params,
         "was_redirected": resolved != stripped,
-        "attempted_resolution": attempted_resolution,
+        "attempted_resolution": confirmed_shortener,
     }
 
 
