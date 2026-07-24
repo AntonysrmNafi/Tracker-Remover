@@ -112,7 +112,27 @@ async def test_normal_redirect_chain(bypass_dns):
     assert result == final_url
 
 
-async def test_redirect_to_private_metadata_ip_is_blocked(bypass_dns):
+async def test_shorturl_at_resolves_and_cleans(bypass_dns):
+    """End-to-end reproduction of the reported case: shorturl.at wasn't
+    being resolved or cleaned at all."""
+    short_url = "https://shorturl.at/bh0P2"
+    final_url = "https://example.com/real-article?utm_source=share&id=42"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == short_url:
+            return httpx.Response(302, headers={"location": final_url})
+        if str(request.url) == final_url:
+            return httpx.Response(200, headers={"content-type": "text/html"}, text="<html></html>")
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    assert main.needs_resolution(short_url) is True
+    resolved = await main.resolve_final_url(short_url, transport=httpx.MockTransport(handler))
+    assert resolved == final_url
+    cleaned = main.clean_url(resolved)
+    assert cleaned == "https://example.com/real-article?id=42"
+
+
+
     public_url = "https://short.example/abc"
     unsafe_target = "http://169.254.169.254/latest/meta-data/"
 
