@@ -1,4 +1,4 @@
-from main import clean_url
+from main import clean_url, clean_url_with_trackers
 
 
 def test_strips_generic_utm_params():
@@ -80,6 +80,28 @@ def test_google_search_strips_tracking_state():
 def test_spotify_strips_si():
     url = "https://open.spotify.com/track/abc123?si=xyz"
     assert clean_url(url) == "https://open.spotify.com/track/abc123"
+
+
+def test_clean_url_with_trackers_reports_removed_params():
+    url = "https://example.com/article?utm_source=fb&utm_medium=social&id=42"
+    cleaned, removed = clean_url_with_trackers(url)
+    assert cleaned == "https://example.com/article?id=42"
+    assert set(removed) == {"utm_source", "utm_medium"}
+
+
+def test_clean_url_with_trackers_reports_dropped_fragment():
+    url = "https://www.facebook.com/story.php?story_fbid=1&fbclid=abc#footer"
+    cleaned, removed = clean_url_with_trackers(url)
+    assert cleaned == "https://www.facebook.com/story.php?story_fbid=1"
+    assert "fbclid" in removed
+    assert "fragment" in removed
+
+
+def test_clean_url_with_trackers_no_trackers_found():
+    url = "https://example.com/just/a/path?id=42"
+    cleaned, removed = clean_url_with_trackers(url)
+    assert cleaned == url
+    assert removed == []
 
 
 def test_url_with_no_query_is_unchanged():
