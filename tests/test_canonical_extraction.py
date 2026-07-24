@@ -15,6 +15,13 @@ def test_og_url_regex_finds_property_after_content():
     assert match.group(1) == "https://www.facebook.com/reel/123/"
 
 
+def test_og_url_regex_tolerates_whitespace_around_equals():
+    html = '<meta property = "og:url" content = "https://www.facebook.com/reel/123/" />'
+    match = OG_URL_RE.search(html)
+    assert match is not None
+    assert match.group(1) == "https://www.facebook.com/reel/123/"
+
+
 def test_canonical_link_regex():
     html = '<link rel="canonical" href="https://example.com/real-article" />'
     match = CANONICAL_LINK_RE.search(html)
