@@ -20,6 +20,16 @@ def test_headers_for_non_facebook_host_uses_default():
     assert main._headers_for("https://www.youtube.com/watch?v=abc") == {}
 
 
+def test_headers_for_twitter_host_uses_twitterbot_ua():
+    headers = main._headers_for("https://x.com/user/status/123")
+    assert headers["User-Agent"] == main.TWITTER_CRAWLER_HEADERS["User-Agent"]
+
+
+def test_headers_for_tco_host_uses_twitterbot_ua():
+    headers = main._headers_for("https://t.co/abc123")
+    assert headers["User-Agent"] == main.TWITTER_CRAWLER_HEADERS["User-Agent"]
+
+
 def test_guard_keeps_resolved_url_when_it_has_a_real_path():
     original = "https://lnkd.in/abc123"
     resolved = "https://www.linkedin.com/posts/user_activity-123"
@@ -124,6 +134,24 @@ async def test_shortlink_hitting_authwall_falls_back_to_short_url(bypass_dns):
             return httpx.Response(302, headers={"location": authwall_url})
         if str(request.url) == authwall_url:
             return httpx.Response(200, headers={"content-type": "text/html"}, text="<html><body>Sign in</body></html>")
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    result = await main.resolve_final_url(short_url, transport=httpx.MockTransport(handler))
+    assert result == short_url
+
+
+async def test_tiktok_shortlink_bouncing_to_homepage_falls_back(bypass_dns):
+    """Matches a real production log: vm.tiktok.com bounced to the bare
+    tiktok.com homepage (a JS-based click-tracking bounce our plain HTTP
+    client can't follow) instead of the actual video."""
+    short_url = "https://vm.tiktok.com/ZMjK12345/"
+    homepage_url = "https://www.tiktok.com/?_r=1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == short_url:
+            return httpx.Response(302, headers={"location": homepage_url})
+        if str(request.url) == homepage_url:
+            return httpx.Response(200, headers={"content-type": "text/html"}, text="<html></html>")
         raise AssertionError(f"unexpected request to {request.url}")
 
     result = await main.resolve_final_url(short_url, transport=httpx.MockTransport(handler))
