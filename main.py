@@ -274,10 +274,17 @@ REQUEST_HEADERS = {
 # they do to known link-preview crawlers (this is how link previews work on
 # Messenger, WhatsApp, Slack, Twitter, etc.). Impersonating that crawler UA
 # for facebook.com hosts is a standard, widely used technique to reliably get
-# the real og:url back instead of an interstitial page.
+# the real og:url back instead of an interstitial page. Twitter/X does the
+# same allowlisting for its own "Twitterbot" UA.
 FACEBOOK_HOST_SUFFIXES = ("facebook.com", "fb.watch", "fb.com", "fb.me", "messenger.com", "m.me")
 FACEBOOK_CRAWLER_HEADERS = {
     "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Accept": "*/*",
+}
+
+TWITTER_HOST_SUFFIXES = ("twitter.com", "x.com", "t.co")
+TWITTER_CRAWLER_HEADERS = {
+    "User-Agent": "Twitterbot/1.0",
     "Accept": "*/*",
 }
 
@@ -286,14 +293,20 @@ def _headers_for(url: str) -> dict:
     host = (httpx.URL(url).host or "").lower()
     if any(host == suffix or host.endswith("." + suffix) for suffix in FACEBOOK_HOST_SUFFIXES):
         return FACEBOOK_CRAWLER_HEADERS
+    if any(host == suffix or host.endswith("." + suffix) for suffix in TWITTER_HOST_SUFFIXES):
+        return TWITTER_CRAWLER_HEADERS
     return {}
 
 
 # Some platforms don't send a normal HTTP redirect to automated clients;
-# instead they serve an HTML page whose <meta property="og:url" ...> or
-# <link rel="canonical" ...> tag holds the real destination URL. These
-# regexes find that URL regardless of attribute order or surrounding
-# whitespace, without needing a full HTML parser.
+# instead they serve an HTML page holding the real destination URL in one of
+# a few common places. These regexes look for each, in order of reliability,
+# without needing a full HTML parser:
+#   1. <meta property="og:url" content="...">
+#   2. <link rel="canonical" href="...">
+#   3. <meta http-equiv="refresh" content="0; url=...">  (old-style bounce page)
+#   4. a JSON-escaped "url":"https:\/\/..." embedded in inline page data
+#      (some platforms only expose the destination this way to non-JS clients)
 OG_URL_RE = re.compile(
     r'<meta\b(?=[^>]*\bproperty\s*=\s*["\']og:url["\'])(?=[^>]*\bcontent\s*=\s*["\']([^"\']+)["\'])[^>]*>',
     re.IGNORECASE,
@@ -302,12 +315,18 @@ CANONICAL_LINK_RE = re.compile(
     r'<link\b(?=[^>]*\brel\s*=\s*["\']canonical["\'])(?=[^>]*\bhref\s*=\s*["\']([^"\']+)["\'])[^>]*>',
     re.IGNORECASE,
 )
+META_REFRESH_RE = re.compile(
+    r'<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["\']refresh["\'])'
+    r'(?=[^>]*\bcontent\s*=\s*["\'][^"\']*url=([^"\'&]+))[^>]*>',
+    re.IGNORECASE,
+)
+JSON_ESCAPED_URL_RE = re.compile(r'"url"\s*:\s*"(https:\\/\\/[^"]+)"', re.IGNORECASE)
 
 
 async def _extract_canonical_url(response: httpx.Response) -> str | None:
     """Read up to CANONICAL_URL_SCAN_LIMIT bytes of an HTML response looking
-    for an og:url or canonical link tag. Capped so a huge/slow response can't
-    be used to exhaust memory or bandwidth."""
+    for the real destination URL. Capped so a huge/slow response can't be
+    used to exhaust memory or bandwidth."""
     collected = bytearray()
     try:
         async for chunk in response.aiter_bytes():
@@ -318,8 +337,16 @@ async def _extract_canonical_url(response: httpx.Response) -> str | None:
         return None
 
     text = collected.decode("utf-8", errors="ignore")
-    match = OG_URL_RE.search(text) or CANONICAL_LINK_RE.search(text)
-    return match.group(1) if match else None
+
+    match = OG_URL_RE.search(text) or CANONICAL_LINK_RE.search(text) or META_REFRESH_RE.search(text)
+    if match:
+        return match.group(1)
+
+    json_match = JSON_ESCAPED_URL_RE.search(text)
+    if json_match:
+        return json_match.group(1).replace("\\/", "/")
+
+    return None
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
@@ -449,14 +476,17 @@ async def process_url(raw_url: str) -> dict:
     """Resolve + clean one URL and report what was done to it.
 
     Returns a dict with:
-      original         the exact text the user sent (unmodified)
-      cleaned           the resolved, tracker-free URL
-      removed_params    tracking query params (and "fragment" if dropped)
-      was_redirected    True if the link was a short/redirect link that had
-                         to be followed to find the real destination
+      original             the exact text the user sent (unmodified)
+      cleaned               the resolved, tracker-free URL
+      removed_params        tracking query params (and "fragment" if dropped)
+      was_redirected        True if the link was a short/redirect link that
+                             was successfully followed to a different URL
+      attempted_resolution  True if this looked like a short/wrapper link we
+                             tried to resolve, whether or not it succeeded
     """
     stripped = strip_trailing_punctuation(raw_url)
-    if needs_resolution(stripped):
+    attempted_resolution = needs_resolution(stripped)
+    if attempted_resolution:
         resolved = await resolve_final_url(stripped)
     else:
         resolved = stripped
@@ -466,15 +496,22 @@ async def process_url(raw_url: str) -> dict:
         "cleaned": cleaned,
         "removed_params": removed_params,
         "was_redirected": resolved != stripped,
+        "attempted_resolution": attempted_resolution,
     }
 
 
 def format_link_block(
-    original: str, cleaned: str, removed_params: list[str], was_redirected: bool
+    original: str,
+    cleaned: str,
+    removed_params: list[str],
+    was_redirected: bool,
+    attempted_resolution: bool = False,
 ) -> str:
     items = list(dict.fromkeys(removed_params))  # dedupe, keep first-seen order
     if was_redirected:
         items.append("Short URL (resolved)")
+    elif attempted_resolution:
+        items.append("Short URL (could not verify destination, kept original)")
     tracker_text = ", ".join(items) if items else "None found"
 
     return (
@@ -587,7 +624,7 @@ def main() -> None:
     app.add_error_handler(error_handler)
 
     logger.info("Bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
