@@ -57,6 +57,16 @@ def test_tiktok_strips_share_params():
     assert clean_url(url) == "https://www.tiktok.com/@user/video/123"
 
 
+def test_tiktok_strips_signature_and_timestamp_added_after_resolving():
+    # These get added by TikTok itself when a vm.tiktok.com short link
+    # resolves to the full video URL.
+    url = (
+        "https://www.tiktok.com/@/video/7519828555069459730"
+        "?_d=secCgYIASAHKAESPgo8AAAA&timestamp=1754116558"
+    )
+    assert clean_url(url) == "https://www.tiktok.com/@/video/7519828555069459730"
+
+
 def test_amazon_strips_affiliate_tag():
     url = "https://www.amazon.com/dp/B08XYZ/ref=abc?tag=partner-20&psc=1"
     assert clean_url(url) == "https://www.amazon.com/dp/B08XYZ/ref=abc"
