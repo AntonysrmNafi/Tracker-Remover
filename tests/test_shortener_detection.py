@@ -21,6 +21,7 @@ from linkcleaner.shortener_detection import needs_resolution
         "https://spotify.link/abc123",
         "https://www.facebook.com/share/v/1BULkwnpQA/",
         "https://www.facebook.com/share/r/1BULkwnpQA/",
+        "https://www.facebook.com/share/p/19XyZaBcDe/",
     ],
 )
 def test_needs_resolution_true_for_shorteners_and_facebook_share(url):
