@@ -1,0 +1,87 @@
+import pytest
+
+from linkcleaner.shortener_detection import needs_resolution
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://bit.ly/abc123",
+        "https://t.co/abc123",
+        "https://lnkd.in/abc123",
+        "https://vm.tiktok.com/abc123/",
+        "https://vt.tiktok.com/abc123/",
+        "https://fb.watch/abc123/",
+        "https://fb.me/abc123",
+        "https://goo.gl/abc123",
+        "https://maps.app.goo.gl/abc123",
+        "https://amzn.to/abc123",
+        "https://pin.it/abc123",
+        "https://redd.it/abc123",
+        "https://spotify.link/abc123",
+        "https://www.facebook.com/share/v/1BULkwnpQA/",
+        "https://www.facebook.com/share/r/1BULkwnpQA/",
+    ],
+)
+def test_needs_resolution_true_for_shorteners_and_facebook_share(url):
+    assert needs_resolution(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678?trk=public_post_share",
+        "https://www.linkedin.com/posts/user_activity-123",
+        "https://www.facebook.com/reel/2180228049484735/",
+        "https://www.facebook.com/watch?v=123456",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://www.instagram.com/p/ABC123/",
+        "https://x.com/user/status/12345",
+        "https://www.tiktok.com/@user/video/123",
+        "https://www.amazon.com/dp/B08XYZ",
+        "https://www.reddit.com/r/test/comments/abc/title/",
+        "https://open.spotify.com/track/abc123",
+    ],
+)
+def test_needs_resolution_false_for_direct_links(url):
+    assert needs_resolution(url) is False
+
+
+def test_needs_resolution_true_for_shorturl_at():
+    # Reported bug: shorturl.at wasn't recognized as a shortener at all.
+    assert needs_resolution("https://shorturl.at/bh0P2") is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://tinyurl.com/abc123",
+        "https://is.gd/abc123",
+        "https://rebrand.ly/abc123",
+        "https://cutt.ly/abc123",
+        "https://rb.gy/abc123",
+        "https://t.ly/abc123",
+    ],
+)
+def test_needs_resolution_true_for_more_curated_shorteners(url):
+    assert needs_resolution(url) is True
+
+
+def test_needs_resolution_true_for_unknown_domain_matching_shortener_pattern():
+    # A shortener service we've never heard of and haven't hardcoded should
+    # still be caught by the bare-random-path heuristic.
+    assert needs_resolution("https://totallynewshortener.io/aB3x9") is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/hello",          # readable word, no digit
+        "https://example.com/my-blog-post",   # hyphenated slug, no digit
+        "https://example.com/",               # bare homepage
+        "https://example.com/a/b",            # more than one path segment
+        "https://example.com/article?id=5",   # has a query string
+    ],
+)
+def test_needs_resolution_false_for_unknown_domain_normal_links(url):
+    assert needs_resolution(url) is False
