@@ -56,6 +56,14 @@ def test_guard_falls_back_on_login_path():
     assert link_resolver.guard_against_authwall(original, resolved) == original
 
 
+def test_guard_falls_back_on_fbwatch_login_redirect():
+    # A private/restricted fb.watch video bounces to a login page instead of
+    # the real content; the guard must keep the original short link.
+    original = "https://fb.watch/n1a2b3c4/"
+    resolved = "https://www.facebook.com/login.php?next=https%3A%2F%2Fwww.facebook.com%2Fwatch%2F%3Fv%3D123"
+    assert link_resolver.guard_against_authwall(original, resolved) == original
+
+
 def test_guard_allows_bare_homepage_when_original_had_no_path_either():
     original = "https://lnkd.in/"
     resolved = "https://www.linkedin.com/"
@@ -195,7 +203,27 @@ async def test_shortlink_hitting_authwall_falls_back_to_short_url(bypass_dns):
     assert result == short_url
 
 
-async def test_tiktok_shortlink_bouncing_to_homepage_falls_back(bypass_dns):
+async def test_fbwatch_private_video_login_redirect_falls_back(bypass_dns):
+    """Exact reported scenario: a private/restricted fb.watch video bounces
+    to a login page instead of the real content. The bot must keep the
+    original short link rather than 'clean' the login URL into a link."""
+    short_url = "https://fb.watch/n1a2b3c4/"
+    login_url = "https://www.facebook.com/login.php?next=https%3A%2F%2Fwww.facebook.com%2Fwatch%2F%3Fv%3D123"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == short_url:
+            return httpx.Response(302, headers={"location": login_url})
+        if str(request.url) == login_url:
+            return httpx.Response(
+                200, headers={"content-type": "text/html"}, text="<html><body>Log in</body></html>"
+            )
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    result = await link_resolver.resolve_final_url(short_url, transport=httpx.MockTransport(handler))
+    assert result == short_url
+
+
+
     """Matches a real production log: vm.tiktok.com bounced to the bare
     tiktok.com homepage (a JS-based click-tracking bounce our plain HTTP
     client can't follow) instead of the actual video."""
