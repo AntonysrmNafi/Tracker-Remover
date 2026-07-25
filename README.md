@@ -1,58 +1,110 @@
 # Link Cleaner Bot
 
-Telegram bot that removes tracking parameters from social media share links. If the link is shortened (bit.ly, vm.tiktok.com, fb.watch, amzn.to, etc.), it follows the redirect first, then cleans the final URL.
+A Telegram bot that cleans up messy social media links. Send it any share link and it sends back a clean, tracker-free version — plus tells you exactly what it removed.
 
-**Private chats only.** The bot does not respond in groups at all (by design, see below).
+## What it does
 
-**Supported platforms:** Facebook, Messenger, YouTube, X/Twitter, Instagram, TikTok, LinkedIn, Snapchat, Reddit, Pinterest, Amazon, Google Search/Maps, Spotify, plus generic `utm_*` and other common ad-click trackers (`gclid`, `fbclid`, `msclkid`, `ttclid`, `ysclid`, ...) on any other domain.
+- **Removes tracking parameters** — the ugly `?utm_source=...`, `?fbclid=...`, `?igshid=...` junk that gets tacked onto links when you share them. These trackers let platforms and advertisers follow you around and know exactly who shared what to whom.
+- **Resolves shortened links** — if you paste a short link (`bit.ly/...`, `vm.tiktok.com/...`, a Facebook `/share/...` link, etc.), the bot follows it to the real destination first, then cleans that.
+- **Works with multiple links at once** — paste several links in one message, get a clean result for each.
+- **Private chat only** — the bot doesn't respond in group chats, so it can't be added to a group and used on other people's messages.
 
-## How it works
+## What you get back
 
-1. User sends a message containing one or more links, in a private chat.
-2. Bot follows redirects (one hop at a time, SSRF-validated at every hop) to resolve the final destination URL.
-3. Bot strips known tracking query parameters, using both a generic list and platform-specific rules, and drops the tracking fragment on domains that use it (Facebook, TikTok).
-4. Bot replies with the clean link(s).
+For every link you send:
 
-## Production hardening in this version
+```
+Your Link : <exactly what you sent>
+Clean & Secure Link : <the clean, tracker-free link>
+Tracker : <what was removed, e.g. "fbclid, utm_source" or "Short URL (resolved)" or "None found">
+```
 
-- **SSRF protection**: every hop's hostname is resolved and checked before it's fetched. Private/loopback/link-local/reserved/multicast IPs (`127.0.0.1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254` cloud metadata, etc., including IPv6 equivalents) are blocked, so a malicious shortened link can't be used to probe your internal network or cloud metadata endpoint. Redirects are followed manually instead of automatically so each hop gets re-validated.
-- **No large downloads**: responses are streamed and the body is never read, only headers/status/redirect target are inspected, then the connection is closed.
-- **Private chats only**: `filters.ChatType.PRIVATE` on every handler, so the bot silently ignores anything in groups/supergroups/channels.
-- **Per-user rate limiting**: max 8 link-cleaning requests per 60 seconds per user (in-memory sliding window) to stop spam.
-- **Telegram flood control**: `AIORateLimiter` automatically paces and retries outgoing Telegram API calls.
-- **Global error handler**: unexpected exceptions are logged and reported to the user instead of crashing the bot.
-- **Non-root Docker container**: the app runs as an unprivileged `app` user, not root.
-- **Async HTTP** via `httpx` instead of blocking `requests` + threads.
+## Supported platforms
 
-## Run locally
+| Platform | What gets cleaned |
+|---|---|
+| **Facebook / Messenger** | `fbclid`, share-tracking IDs, `/share/v/` and `/share/r/` links resolved to the real post |
+| **Instagram** | `igsh`, `igshid` share IDs |
+| **YouTube** | `si` tracking ID (keeps `v`, `t`, `list` — the parts that actually matter) |
+| **X / Twitter** | `s`, `t` tracking params, `t.co` short links resolved |
+| **TikTok** | share/tracking IDs, `vm.tiktok.com` / `vt.tiktok.com` short links resolved |
+| **LinkedIn** | `trk` and related tracking params, `lnkd.in` short links resolved |
+| **Snapchat** | share/attribution IDs |
+| **Reddit** | `share_id`, `redd.it` short links resolved |
+| **Pinterest** | sender/invite tracking IDs, `pin.it` short links resolved |
+| **Amazon** | affiliate tags and referral tracking |
+| **Google Search / Maps** | search-session tracking params |
+| **Spotify** | `si` share ID |
+| **Anything else** | generic trackers (`utm_*`, `gclid`, `msclkid`, `ttclid`, `ysclid`, and more) are stripped from any link, and 45+ known URL shorteners (`tinyurl.com`, `is.gd`, `rebrand.ly`, `shorturl.at`, and more) are resolved — plus unfamiliar shorteners are usually detected automatically |
+
+## How to use it
+
+1. Open a private chat with the bot.
+2. Send `/start` for a quick intro.
+3. Paste any link (or several) — the bot replies automatically, no command needed.
+
+## A note on limits
+
+- A few shorteners (notably some TikTok short links) use a bounce mechanism that a plain link-following bot can't fully follow. In that case the bot is honest about it — "could not verify destination, kept original" — instead of guessing.
+- The bot never guesses a "cleaned" link into something worse: if resolving a short link would land on a login/authwall page, it keeps your original link instead.
+
+---
+
+## For developers
+
+<details>
+<summary>Project structure, local setup, and deployment</summary>
+
+The bot is a Python package, `linkcleaner/`, split by responsibility:
+
+```
+linkcleaner/
+├── __init__.py
+├── __main__.py            entrypoint: `python -m linkcleaner`
+├── url_utils.py            URL regex + trailing-punctuation stripping
+├── tracking_rules.py       which query params/fragments are trackers, per platform, and clean_url()
+├── shortener_detection.py  decides whether a link needs to be fetched to find its real destination
+├── ssrf_guard.py           validates a host is safe to fetch (SSRF protection)
+├── link_resolver.py        follows redirects, crawler headers, HTML fallback extraction, authwall guard
+├── link_processor.py       ties resolution + cleaning together, builds the reply text
+├── rate_limiter.py         per-user sliding-window rate limit
+└── telegram_bot.py         the only module that talks to python-telegram-bot
+```
+
+```
+tests/
+├── conftest.py
+├── test_tracking_rules.py
+├── test_shortener_detection.py
+├── test_ssrf_guard.py
+├── test_link_resolver.py
+├── test_canonical_extraction.py
+└── test_link_processor.py
+```
+
+### Production hardening
+
+- **SSRF protection**: every redirect hop's hostname is resolved and checked before it's fetched. Private/loopback/link-local/reserved/multicast IPs (including cloud metadata endpoints like `169.254.169.254`) are blocked. Redirects are followed manually, one hop at a time, so every hop is re-validated.
+- **No large downloads**: responses are streamed and never fully read — only headers/status/redirect target (and a capped chunk of HTML when needed) are inspected.
+- **Authwall guard**: a resolved URL that looks like a login/authwall bounce is discarded in favor of the original link.
+- **Private chats only**, **per-user rate limiting**, **Telegram flood-control handling**, **global error handler**, **non-root Docker container**, **async HTTP via `httpx`**.
+
+### Run locally
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Copy `.env.example` to `.env` and paste your token:
-   ```
-   BOT_TOKEN=your_bot_token_from_botfather
-   ```
-   `main.py` loads `.env` automatically via `python-dotenv`.
-4. Run:
-   ```
-   python main.py
-   ```
+2. `pip install -r requirements.txt`
+3. Copy `.env.example` to `.env` and set `BOT_TOKEN=your_token`.
+4. `python -m linkcleaner`
 
-## Deploy on Railway
+### Deploy on Railway
 
-1. Push this folder to a GitHub repository (`.env` is git-ignored, it never gets committed).
-2. In Railway, create a new project and choose "Deploy from GitHub repo", select this repo.
-3. In the Railway project's Variables tab, add:
-   - `BOT_TOKEN` = your token from BotFather
-4. Railway detects the `Dockerfile` and builds/runs the container automatically. No start command needed, it's set by `CMD` in the Dockerfile.
-5. Deploy. Check the Deployments logs for "Bot starting..." to confirm it's running.
+1. Push this repo to GitHub.
+2. In Railway: New Project → Deploy from GitHub repo.
+3. Add the `BOT_TOKEN` variable in the Railway project's Variables tab.
+4. Railway builds/runs the `Dockerfile` automatically.
+5. Make sure the service has **1 replica** — two instances polling the same `BOT_TOKEN` causes a harmless-but-noisy `Conflict` error during redeploys.
 
-Note: this bot uses long polling (`run_polling`), not webhooks, so no public URL or port is needed on Railway.
-
-## Running tests and lint locally
+### Tests and lint
 
 ```
 pip install -r requirements-dev.txt
@@ -60,18 +112,17 @@ ruff check .
 pytest -v
 ```
 
-`tests/test_clean_url.py` covers the per-platform cleaning rules, `tests/test_ssrf.py` covers the private/internal IP blocking. GitHub Actions (`.github/workflows/ci.yml`) runs both automatically on every push and pull request.
+GitHub Actions (`.github/workflows/ci.yml`) runs both on every push and pull request.
 
-## Adding more tracking parameters
+### Extending it
 
-Open `main.py` and edit:
-- `GENERIC_TRACKING_PARAMS_EXACT` for exact parameter names stripped on every domain.
-- `GENERIC_TRACKING_PARAMS_PREFIX` for parameter name prefixes (like `utm_`).
-- `PLATFORM_RULES` to add/adjust a platform: its domains, its extra tracking parameters, and whether its fragment (`#...`) should be dropped.
+- Add tracking params in `linkcleaner/tracking_rules.py` (`GENERIC_TRACKING_PARAMS_EXACT`, `GENERIC_TRACKING_PARAMS_PREFIX`, or a new/updated entry in `PLATFORM_RULES`).
+- Add shorteners in `linkcleaner/shortener_detection.py` (`SHORTENER_DOMAINS`), though the heuristic in `looks_like_unknown_shortlink` catches most new ones automatically.
+- Add a matching test case alongside whichever module you change.
 
-Add a matching test case in `tests/test_clean_url.py` when you do.
+### Known limitations
 
-## Known limitations
+- The SSRF guard doesn't defend against DNS-rebinding attacks that swap the IP between the check and the actual connect — an accepted tradeoff for this bot's threat model.
+- `vm.tiktok.com`-style JS-based click-tracking bounces can't be followed by a plain HTTP client; the bot falls back to the original link rather than showing a broken result.
 
-- The SSRF guard blocks based on DNS resolution at request time; it does not defend against a sophisticated DNS-rebinding attack that changes the IP between the check and the actual TCP connect. For this bot's threat model (public link-cleaning, not a high-security proxy) that's an accepted tradeoff.
-- Google Maps short links (`maps.app.goo.gl`) resolve like any other shortener, but very long Maps URLs may still carry some non-tracking state parameters that are intentionally left untouched to avoid breaking the link.
+</details>
