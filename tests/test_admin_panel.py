@@ -112,3 +112,73 @@ async def test_blocklist_csv_includes_blocked_users():
     text = csv_bytes.decode("utf-8")
     assert "1,alice,Alice" in text
     assert "bob" not in text
+
+
+# ---------------------------------------------------------------------------
+# resolve_broadcast_target
+# ---------------------------------------------------------------------------
+async def test_resolve_broadcast_target_by_numeric_id_for_known_user():
+    await stats_store.touch_user(42, "alice", "Alice")
+    assert await admin_panel.resolve_broadcast_target("42") == 42
+
+
+async def test_resolve_broadcast_target_by_numeric_id_for_unknown_user_fails():
+    assert await admin_panel.resolve_broadcast_target("999999") is None
+
+
+async def test_resolve_broadcast_target_by_username():
+    await stats_store.touch_user(42, "alice", "Alice")
+    assert await admin_panel.resolve_broadcast_target("@alice") == 42
+
+
+async def test_resolve_broadcast_target_by_username_case_insensitive():
+    await stats_store.touch_user(42, "Alice", "Alice")
+    assert await admin_panel.resolve_broadcast_target("@ALICE") == 42
+
+
+async def test_resolve_broadcast_target_unknown_username_fails():
+    assert await admin_panel.resolve_broadcast_target("@nobody") is None
+
+
+async def test_resolve_broadcast_target_garbage_input_fails():
+    assert await admin_panel.resolve_broadcast_target("not valid") is None
+
+
+# ---------------------------------------------------------------------------
+# parse_expire_hours
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("text", ["1", "70", "24", " 12 "])
+def test_parse_expire_hours_accepts_valid_range(text):
+    assert admin_panel.parse_expire_hours(text) == int(text.strip())
+
+
+@pytest.mark.parametrize("text", ["0", "71", "100", "-5", "abc", "", "12.5"])
+def test_parse_expire_hours_rejects_out_of_range_or_invalid(text):
+    assert admin_panel.parse_expire_hours(text) is None
+
+
+# ---------------------------------------------------------------------------
+# validate_button_url
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("url", ["https://example.com", "http://example.com/page?x=1"])
+def test_validate_button_url_accepts_valid_http_urls(url):
+    assert admin_panel.validate_button_url(url) == url
+
+
+@pytest.mark.parametrize("url", ["ftp://example.com", "example.com", "not a url", "javascript:alert(1)", ""])
+def test_validate_button_url_rejects_invalid_input(url):
+    assert admin_panel.validate_button_url(url) is None
+
+
+# ---------------------------------------------------------------------------
+# build_ad_preview_text
+# ---------------------------------------------------------------------------
+def test_build_ad_preview_text_with_button():
+    text = admin_panel.build_ad_preview_text("Visit", "https://example.com", 24)
+    assert "Auto-deletes after : 24h" in text
+    assert "Button : Visit → https://example.com" in text
+
+
+def test_build_ad_preview_text_without_button():
+    text = admin_panel.build_ad_preview_text(None, None, 5)
+    assert "Button : (none)" in text
