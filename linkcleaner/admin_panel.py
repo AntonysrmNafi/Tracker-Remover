@@ -9,6 +9,7 @@ import io
 from datetime import datetime, timezone
 
 from linkcleaner import stats_store
+from linkcleaner.ad_store import MAX_EXPIRE_HOURS, MIN_EXPIRE_HOURS
 
 TOP_DOMAINS_LIMIT = 10
 USER_TOP_DOMAINS_LIMIT = 5
@@ -21,6 +22,58 @@ def parse_user_id(text: str) -> int | None:
     if not text.isdigit():
         return None
     return int(text)
+
+
+async def resolve_broadcast_target(text: str) -> int | None:
+    """Resolves admin input (a numeric user ID, or an @username of someone
+    who has messaged the bot before) to a user ID. Returns None if it can't
+    be resolved."""
+    text = text.strip()
+    if text.startswith("@"):
+        return await stats_store.get_user_id_by_username(text)
+
+    user_id = parse_user_id(text)
+    if user_id is None:
+        return None
+
+    info = await stats_store.get_user_info(user_id)
+    return user_id if info.is_known else None
+
+
+def parse_expire_hours(text: str) -> int | None:
+    """Parses an ad's auto-delete delay. Must be a plain integer between
+    MIN_EXPIRE_HOURS and MAX_EXPIRE_HOURS inclusive."""
+    text = text.strip()
+    if not text.isdigit():
+        return None
+    hours = int(text)
+    if not (MIN_EXPIRE_HOURS <= hours <= MAX_EXPIRE_HOURS):
+        return None
+    return hours
+
+
+def validate_button_url(text: str) -> str | None:
+    """Accepts a button URL only if it's a plain http(s) link with no
+    surrounding whitespace/garbage. Returns the URL unchanged if valid."""
+    text = text.strip()
+    if " " in text or "\n" in text:
+        return None
+    if not (text.startswith("http://") or text.startswith("https://")):
+        return None
+    if len(text) < len("http://x.co"):
+        return None
+    return text
+
+
+def build_ad_preview_text(button_text: str | None, button_url: str | None, expire_hours: int) -> str:
+    lines = ["📢 Ad ready to send.", "", f"Auto-deletes after : {expire_hours}h"]
+    if button_text and button_url:
+        lines.append(f"Button : {button_text} → {button_url}")
+    else:
+        lines.append("Button : (none)")
+    lines.append("")
+    lines.append("Tap ✅ Send to broadcast it now, or ❌ Cancel to discard it.")
+    return "\n".join(lines)
 
 
 def _format_timestamp(ts: float | None) -> str:
