@@ -280,6 +280,23 @@ def _get_user_row_sync(user_id: int):
         ).fetchone()
 
 
+def _get_all_user_ids_sync() -> list[int]:
+    # Broadcasts/ads reach every known user, including blocked ones — being
+    # blocked only stops someone from using the bot's normal features
+    # (link cleaning, Profile, /start), not from receiving admin messages.
+    with closing(_connect()) as conn:
+        rows = conn.execute("SELECT user_id FROM users").fetchall()
+    return [row[0] for row in rows]
+
+
+def _get_user_id_by_username_sync(username: str) -> int | None:
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT user_id FROM users WHERE LOWER(username) = LOWER(?)", (username,)
+        ).fetchone()
+    return row[0] if row else None
+
+
 async def get_user_stats(user_id: int) -> UserStats:
     return await asyncio.to_thread(_get_stats_sync, user_id)
 
@@ -302,6 +319,14 @@ async def is_blocked(user_id: int) -> bool:
 
 async def list_blocked_users() -> list[BlockedUser]:
     return await asyncio.to_thread(_list_blocked_users_sync)
+
+
+async def get_all_user_ids() -> list[int]:
+    return await asyncio.to_thread(_get_all_user_ids_sync)
+
+
+async def get_user_id_by_username(username: str) -> int | None:
+    return await asyncio.to_thread(_get_user_id_by_username_sync, username.lstrip("@"))
 
 
 async def get_user_info(user_id: int) -> UserInfo:
