@@ -1,6 +1,6 @@
 import pytest
 
-from linkcleaner.url_utils import get_domain, strip_trailing_punctuation
+from linkcleaner.url_utils import URL_REGEX, ensure_scheme, get_domain, strip_trailing_punctuation
 
 
 @pytest.mark.parametrize(
@@ -27,3 +27,47 @@ def test_strip_trailing_punctuation_removes_sentence_punctuation():
 def test_strip_trailing_punctuation_keeps_legitimate_closing_paren():
     url = "https://en.wikipedia.org/wiki/Mercury_(planet)"
     assert strip_trailing_punctuation(url) == url
+
+
+# ---------------------------------------------------------------------------
+# URL_REGEX: schemeless link detection (Point 3 bug report)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("text", "expected_match"),
+    [
+        ("check https://www.facebook.com/x out", "https://www.facebook.com/x"),
+        ("go to www.facebook.com now", "www.facebook.com"),
+        ("youtube.com/sgdydy is cool", "youtube.com/sgdydy"),
+        ("try https://facebook.com today", "https://facebook.com"),
+        ("bbc.co.uk is a news site", "bbc.co.uk"),
+        ("visit http://10.0.0.1/path please", "http://10.0.0.1/path"),
+    ],
+)
+def test_url_regex_detects_schemed_and_schemeless_links(text, expected_match):
+    assert URL_REGEX.findall(text) == [expected_match]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "contact info@example.com please",
+        "version 3.5.1 released",
+        "e.g. this is a test",
+        "Mr. Smith went home",
+        "connect to 10.0.0.1 now",  # bare IP, no scheme — not a domain-like TLD match
+        "just a plain sentence",
+    ],
+)
+def test_url_regex_avoids_false_positives(text):
+    assert URL_REGEX.findall(text) == []
+
+
+def test_ensure_scheme_adds_https_to_schemeless_link():
+    assert ensure_scheme("www.facebook.com") == "https://www.facebook.com"
+    assert ensure_scheme("youtube.com/sgdydy") == "https://youtube.com/sgdydy"
+
+
+def test_ensure_scheme_leaves_schemed_link_unchanged():
+    assert ensure_scheme("https://example.com") == "https://example.com"
+    assert ensure_scheme("http://example.com") == "http://example.com"
+
