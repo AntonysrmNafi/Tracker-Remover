@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 from linkcleaner.link_resolver import resolve_final_url
 from linkcleaner.shortener_detection import is_known_shortener, looks_like_unknown_shortlink
 from linkcleaner.tracking_rules import clean_url_with_trackers
-from linkcleaner.url_utils import strip_trailing_punctuation
+from linkcleaner.url_utils import ensure_scheme, strip_trailing_punctuation
 
 
 async def process_url(raw_url: str) -> dict:
@@ -28,6 +28,7 @@ async def process_url(raw_url: str) -> dict:
                              unnecessary "could not verify" message.
     """
     stripped = strip_trailing_punctuation(raw_url)
+    stripped = ensure_scheme(stripped)
     parsed = urlsplit(stripped)
     domain = parsed.netloc.lower().removeprefix("www.")
     confirmed_shortener = is_known_shortener(domain, parsed.path)
