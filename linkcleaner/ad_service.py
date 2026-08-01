@@ -30,6 +30,7 @@ async def _send_ad_to_one(
     source_chat_id: int,
     source_message_id: int,
     markup: InlineKeyboardMarkup | None,
+    pinned: bool,
     semaphore: asyncio.Semaphore,
 ) -> bool:
     async with semaphore:
@@ -41,16 +42,26 @@ async def _send_ad_to_one(
                 reply_markup=markup,
             )
             await ad_store.record_delivery(ad_id, user_id, result.message_id)
-            return True
         except TelegramError as exc:
             logger.warning("Ad %s delivery to %s failed: %s", ad_id, user_id, exc)
             return False
 
+        if pinned:
+            try:
+                await bot.pin_chat_message(chat_id=user_id, message_id=result.message_id, disable_notification=True)
+            except TelegramError as exc:
+                # Pinning is best-effort — the ad still went out successfully
+                # even if we couldn't pin it (e.g. the user disabled pins).
+                logger.warning("Could not pin ad %s message for user %s: %s", ad_id, user_id, exc)
+
+        return True
+
 
 async def send_ad(bot: Bot, ad_id: int) -> int:
     """Sends the ad to every known user (blocked or not), records each
-    delivery, and marks the ad as sent with its expiry time set. Returns
-    the number of users it was successfully sent to."""
+    delivery, pins it in each recipient's chat if requested, and marks the
+    ad as sent with its expiry time set. Returns the number of users it was
+    successfully sent to."""
     ad = await ad_store.get_ad(ad_id)
     if ad is None:
         return 0
@@ -60,7 +71,7 @@ async def send_ad(bot: Bot, ad_id: int) -> int:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SENDS)
     results = await asyncio.gather(
         *(
-            _send_ad_to_one(bot, ad_id, uid, ad.source_chat_id, ad.source_message_id, markup, semaphore)
+            _send_ad_to_one(bot, ad_id, uid, ad.source_chat_id, ad.source_message_id, markup, ad.pinned, semaphore)
             for uid in user_ids
         )
     )
