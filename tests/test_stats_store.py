@@ -192,3 +192,71 @@ async def test_user_info_combines_profile_stats_and_domains():
     assert info.stats.total == 3
     assert info.top_domains[0].domain == "youtube.com"
     assert info.top_domains[0].count == 2
+
+
+# ---------------------------------------------------------------------------
+# Privacy mode
+# ---------------------------------------------------------------------------
+async def test_privacy_mode_defaults_off():
+    await stats_store.touch_user(1, "alice", "Alice")
+    assert await stats_store.is_privacy_mode_enabled(1) is False
+
+
+async def test_privacy_mode_defaults_off_for_unknown_user():
+    assert await stats_store.is_privacy_mode_enabled(999999) is False
+
+
+async def test_set_privacy_mode_on_and_off():
+    await stats_store.touch_user(1, "alice", "Alice")
+    await stats_store.set_privacy_mode(1, True)
+    assert await stats_store.is_privacy_mode_enabled(1) is True
+
+    await stats_store.set_privacy_mode(1, False)
+    assert await stats_store.is_privacy_mode_enabled(1) is False
+
+
+async def test_user_info_includes_privacy_mode():
+    await stats_store.touch_user(1, "alice", "Alice")
+    await stats_store.set_privacy_mode(1, True)
+
+    info = await stats_store.get_user_info(1)
+    assert info.privacy_mode is True
+
+
+# ---------------------------------------------------------------------------
+# Captcha verification
+# ---------------------------------------------------------------------------
+async def test_captcha_verified_defaults_off():
+    await stats_store.touch_user(1, "alice", "Alice")
+    assert await stats_store.is_captcha_verified(1) is False
+
+
+async def test_captcha_verified_defaults_off_for_unknown_user():
+    assert await stats_store.is_captcha_verified(999999) is False
+
+
+async def test_set_captcha_verified_on_and_off():
+    await stats_store.touch_user(1, "alice", "Alice")
+    await stats_store.set_captcha_verified(1, True)
+    assert await stats_store.is_captcha_verified(1) is True
+
+    await stats_store.set_captcha_verified(1, False)
+    assert await stats_store.is_captcha_verified(1) is False
+
+
+# ---------------------------------------------------------------------------
+# get_all_user_ids (used by broadcasts/ads)
+# ---------------------------------------------------------------------------
+async def test_get_all_user_ids_includes_blocked_users():
+    await stats_store.touch_user(1, "alice", "Alice")
+    await stats_store.touch_user(2, "bob", "Bob")
+    await stats_store.block_user(2)
+
+    assert set(await stats_store.get_all_user_ids()) == {1, 2}
+
+
+async def test_get_user_id_by_username():
+    await stats_store.touch_user(1, "Alice", "Alice")
+    assert await stats_store.get_user_id_by_username("alice") == 1
+    assert await stats_store.get_user_id_by_username("@Alice") == 1
+    assert await stats_store.get_user_id_by_username("nobody") is None
