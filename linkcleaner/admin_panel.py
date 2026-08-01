@@ -8,7 +8,7 @@ import csv
 import io
 from datetime import datetime, timezone
 
-from linkcleaner import stats_store
+from linkcleaner import settings_store, stats_store
 from linkcleaner.ad_store import MAX_EXPIRE_HOURS, MIN_EXPIRE_HOURS
 
 TOP_DOMAINS_LIMIT = 10
@@ -65,8 +65,15 @@ def validate_button_url(text: str) -> str | None:
     return text
 
 
-def build_ad_preview_text(button_text: str | None, button_url: str | None, expire_hours: int) -> str:
-    lines = ["📢 Ad ready to send.", "", f"Auto-deletes after : {expire_hours}h"]
+def build_ad_preview_text(
+    button_text: str | None, button_url: str | None, expire_hours: int, pinned: bool = False
+) -> str:
+    lines = [
+        "📢 Ad ready to send.",
+        "",
+        f"Auto-deletes after : {expire_hours}h",
+        f"Pinned : {'Yes' if pinned else 'No'}",
+    ]
     if button_text and button_url:
         lines.append(f"Button : {button_text} → {button_url}")
     else:
@@ -74,6 +81,26 @@ def build_ad_preview_text(button_text: str | None, button_url: str | None, expir
     lines.append("")
     lines.append("Tap ✅ Send to broadcast it now, or ❌ Cancel to discard it.")
     return "\n".join(lines)
+
+
+def validate_maintenance_message(text: str) -> str | None:
+    """Accepts a non-empty maintenance message up to the configured
+    character limit. Returns the trimmed message if valid, else None."""
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > settings_store.MAX_MAINTENANCE_MESSAGE_LENGTH:
+        return None
+    return text
+
+
+def build_maintenance_status_text(state: settings_store.MaintenanceState) -> str:
+    status = "🟢 ON — the bot is not responding to regular users" if state.enabled else "⚪ OFF — the bot is running normally"
+    return (
+        "🔧 Maintenance\n\n"
+        f"Status : {status}\n\n"
+        f"Current message shown to users while ON:\n{state.message}"
+    )
 
 
 def _format_timestamp(ts: float | None) -> str:
@@ -128,8 +155,13 @@ async def build_user_info_text(user_id: int) -> str:
         f"Member since : {_format_timestamp(info.first_seen)}",
         "",
     ]
-    lines += _format_stats_block(info.stats)
-    lines += _format_domain_list("Top Domains", info.top_domains)
+
+    if info.privacy_mode:
+        lines.append("🔒 This user has Privacy Mode enabled — their link-cleaning history is hidden.")
+    else:
+        lines += _format_stats_block(info.stats)
+        lines += _format_domain_list("Top Domains", info.top_domains)
+
     return "\n".join(lines)
 
 
