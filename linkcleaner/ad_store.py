@@ -35,6 +35,7 @@ class Ad:
     sent_at: float | None
     expires_at: float | None
     sent_count: int
+    pinned: bool
 
 
 @dataclass
@@ -61,7 +62,8 @@ def _connect() -> sqlite3.Connection:
             status TEXT NOT NULL DEFAULT 'draft',
             sent_at REAL,
             expires_at REAL,
-            sent_count INTEGER NOT NULL DEFAULT 0
+            sent_count INTEGER NOT NULL DEFAULT 0,
+            pinned INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -77,6 +79,10 @@ def _connect() -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_deliveries_ad ON ad_deliveries(ad_id)")
+    try:
+        conn.execute("ALTER TABLE ads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 
@@ -85,18 +91,18 @@ def _row_to_ad(row) -> Ad:
         id=row[0], source_chat_id=row[1], source_message_id=row[2],
         button_text=row[3], button_url=row[4], expire_hours=row[5],
         created_at=row[6], status=row[7], sent_at=row[8], expires_at=row[9],
-        sent_count=row[10],
+        sent_count=row[10], pinned=bool(row[11]),
     )
 
 
-def _create_ad_sync(source_chat_id: int, source_message_id: int, now: float) -> int:
+def _create_ad_sync(source_chat_id: int, source_message_id: int, pinned: bool, now: float) -> int:
     with closing(_connect()) as conn, conn:
         cursor = conn.execute(
             """
-            INSERT INTO ads (source_chat_id, source_message_id, expire_hours, created_at, status)
-            VALUES (?, ?, 0, ?, 'draft')
+            INSERT INTO ads (source_chat_id, source_message_id, expire_hours, created_at, status, pinned)
+            VALUES (?, ?, 0, ?, 'draft', ?)
             """,
-            (source_chat_id, source_message_id, now),
+            (source_chat_id, source_message_id, now, 1 if pinned else 0),
         )
         return cursor.lastrowid
 
@@ -163,8 +169,8 @@ def _get_pending_expiry_ads_sync() -> list:
     return [_row_to_ad(row) for row in rows]
 
 
-async def create_ad(source_chat_id: int, source_message_id: int) -> int:
-    return await asyncio.to_thread(_create_ad_sync, source_chat_id, source_message_id, time.time())
+async def create_ad(source_chat_id: int, source_message_id: int, pinned: bool = False) -> int:
+    return await asyncio.to_thread(_create_ad_sync, source_chat_id, source_message_id, pinned, time.time())
 
 
 async def update_ad_button(ad_id: int, button_text: str | None, button_url: str | None) -> None:
