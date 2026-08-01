@@ -182,3 +182,75 @@ def test_build_ad_preview_text_with_button():
 def test_build_ad_preview_text_without_button():
     text = admin_panel.build_ad_preview_text(None, None, 5)
     assert "Button : (none)" in text
+
+
+# ---------------------------------------------------------------------------
+# AD preview with pin
+# ---------------------------------------------------------------------------
+def test_build_ad_preview_text_shows_pinned_yes():
+    text = admin_panel.build_ad_preview_text(None, None, 5, pinned=True)
+    assert "Pinned : Yes" in text
+
+
+def test_build_ad_preview_text_shows_pinned_no_by_default():
+    text = admin_panel.build_ad_preview_text(None, None, 5)
+    assert "Pinned : No" in text
+
+
+# ---------------------------------------------------------------------------
+# Maintenance message validation
+# ---------------------------------------------------------------------------
+def test_validate_maintenance_message_accepts_normal_text():
+    assert admin_panel.validate_maintenance_message("Back in an hour!") == "Back in an hour!"
+
+
+def test_validate_maintenance_message_rejects_empty():
+    assert admin_panel.validate_maintenance_message("   ") is None
+
+
+def test_validate_maintenance_message_rejects_over_limit():
+    too_long = "x" * 2001
+    assert admin_panel.validate_maintenance_message(too_long) is None
+
+
+def test_validate_maintenance_message_accepts_at_limit():
+    exactly_limit = "x" * 2000
+    assert admin_panel.validate_maintenance_message(exactly_limit) == exactly_limit
+
+
+def test_build_maintenance_status_text_on():
+    import linkcleaner.settings_store as settings_store
+    state = settings_store.MaintenanceState(enabled=True, message="Down for repairs")
+    text = admin_panel.build_maintenance_status_text(state)
+    assert "🟢 ON" in text
+    assert "Down for repairs" in text
+
+
+def test_build_maintenance_status_text_off():
+    import linkcleaner.settings_store as settings_store
+    state = settings_store.MaintenanceState(enabled=False, message="msg")
+    text = admin_panel.build_maintenance_status_text(state)
+    assert "⚪ OFF" in text
+
+
+# ---------------------------------------------------------------------------
+# Privacy-mode-aware User Info
+# ---------------------------------------------------------------------------
+async def test_user_info_hides_stats_when_privacy_mode_enabled():
+    await stats_store.touch_user(1, "alice", "Alice")
+    await stats_store.record_links_cleaned(1, ["youtube.com"])
+    await stats_store.set_privacy_mode(1, True)
+
+    text = await admin_panel.build_user_info_text(1)
+    assert "Privacy Mode enabled" in text
+    assert "Total :" not in text
+    assert "youtube.com" not in text
+
+
+async def test_user_info_shows_stats_when_privacy_mode_disabled():
+    await stats_store.touch_user(1, "alice", "Alice")
+    await stats_store.record_links_cleaned(1, ["youtube.com"])
+
+    text = await admin_panel.build_user_info_text(1)
+    assert "Total : 1" in text
+    assert "youtube.com" in text
