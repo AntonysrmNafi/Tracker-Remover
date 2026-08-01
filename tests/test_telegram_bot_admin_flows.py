@@ -10,6 +10,7 @@ from telegram.constants import ChatType
 
 import linkcleaner.ad_store as ad_store
 import linkcleaner.broadcast_store as broadcast_store
+import linkcleaner.settings_store as settings_store
 import linkcleaner.stats_store as stats_store
 import linkcleaner.telegram_bot as telegram_bot
 
@@ -22,6 +23,7 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_store, "DB_PATH", str(db_path))
     monkeypatch.setattr(broadcast_store, "DB_PATH", str(db_path))
     monkeypatch.setattr(ad_store, "DB_PATH", str(db_path))
+    monkeypatch.setattr(settings_store, "DB_PATH", str(db_path))
     yield db_path
 
 
@@ -75,6 +77,12 @@ class FakeCallbackQuery:
     async def answer(self, text=None, show_alert=False):
         self.answered = True
         self.answer_text = text
+
+    async def edit_message_text(self, text, reply_markup=None, **kwargs):
+        # Recorded in the same sink as reply_text so existing assertions
+        # against message.replies[-1] keep working regardless of whether a
+        # given response was an edit or a fresh message.
+        self.message.replies.append((text, reply_markup))
 
 
 class FakeJobQueue:
@@ -228,24 +236,31 @@ async def test_ad_flow_skip_button_and_send():
     msg1 = FakeMessage(chat, 1)
     update, _ = _callback_update("admin:ad_create", 9, msg1)
     await telegram_bot.handle_admin_callback(update, FakeContext())
+    assert telegram_bot._admin_state[9]["step"] == "pin_choice"
 
-    content_msg = FakeMessage(chat, 2, text="Buy now!", from_user=admin)
+    pin_msg = FakeMessage(chat, 2)
+    update, _ = _callback_update("admin:ad_pin_no", 9, pin_msg)
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+    assert telegram_bot._admin_state[9]["step"] == "content"
+
+    content_msg = FakeMessage(chat, 3, text="Buy now!", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(content_msg), FakeContext())
     ad_id = telegram_bot._admin_state[9]["ad_id"]
     ad = await ad_store.get_ad(ad_id)
     assert ad.status == "draft"
+    assert ad.pinned is False
 
-    skip_msg = FakeMessage(chat, 3)
+    skip_msg = FakeMessage(chat, 4)
     update, _ = _callback_update("admin:ad_skip_button", 9, skip_msg)
     await telegram_bot.handle_admin_callback(update, FakeContext())
     assert telegram_bot._admin_state[9]["step"] == "hours"
 
-    hours_msg = FakeMessage(chat, 4, text="24", from_user=admin)
+    hours_msg = FakeMessage(chat, 5, text="24", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(hours_msg), FakeContext())
     assert telegram_bot._admin_state[9]["step"] == "confirm"
     assert "Auto-deletes after : 24h" in hours_msg.replies[-1][0]
 
-    send_msg = FakeMessage(chat, 5)
+    send_msg = FakeMessage(chat, 6)
     job_queue = FakeJobQueue()
     bot = FakeBot()
     update, _ = _callback_update("admin:ad_send", 9, send_msg)
@@ -269,23 +284,28 @@ async def test_ad_flow_with_button():
     update, _ = _callback_update("admin:ad_create", 9, msg1)
     await telegram_bot.handle_admin_callback(update, FakeContext())
 
-    content_msg = FakeMessage(chat, 2, text="Ad content", from_user=admin)
+    pin_msg = FakeMessage(chat, 2)
+    update, _ = _callback_update("admin:ad_pin_yes", 9, pin_msg)
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+
+    content_msg = FakeMessage(chat, 3, text="Ad content", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(content_msg), FakeContext())
     ad_id = telegram_bot._admin_state[9]["ad_id"]
+    assert (await ad_store.get_ad(ad_id)).pinned is True
 
-    add_btn_msg = FakeMessage(chat, 3)
+    add_btn_msg = FakeMessage(chat, 4)
     update, _ = _callback_update("admin:ad_add_button", 9, add_btn_msg)
     await telegram_bot.handle_admin_callback(update, FakeContext())
 
-    name_msg = FakeMessage(chat, 4, text="Shop Now", from_user=admin)
+    name_msg = FakeMessage(chat, 5, text="Shop Now", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(name_msg), FakeContext())
 
-    bad_link_msg = FakeMessage(chat, 5, text="not a link", from_user=admin)
+    bad_link_msg = FakeMessage(chat, 6, text="not a link", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(bad_link_msg), FakeContext())
     assert "doesn't look like a valid link" in bad_link_msg.replies[-1][0]
     assert telegram_bot._admin_state[9]["step"] == "button_link"  # stayed on this step
 
-    good_link_msg = FakeMessage(chat, 6, text="https://example.com/shop", from_user=admin)
+    good_link_msg = FakeMessage(chat, 7, text="https://example.com/shop", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(good_link_msg), FakeContext())
     assert telegram_bot._admin_state[9]["step"] == "hours"
 
@@ -293,7 +313,7 @@ async def test_ad_flow_with_button():
     assert ad.button_text == "Shop Now"
     assert ad.button_url == "https://example.com/shop"
 
-    hours_msg = FakeMessage(chat, 7, text="1", from_user=admin)
+    hours_msg = FakeMessage(chat, 8, text="1", from_user=admin)
     await telegram_bot.handle_admin_group_message(_message_update(hours_msg), FakeContext())
     assert "Button : Shop Now → https://example.com/shop" in hours_msg.replies[-1][0]
 
@@ -355,3 +375,72 @@ async def test_blocked_user_gets_blocked_message_instead_of_cleaning(monkeypatch
     await telegram_bot.handle_message(_message_update(message), FakeContext())
 
     assert message.replies == [(telegram_bot.BLOCKED_MESSAGE, None)]
+
+
+# ---------------------------------------------------------------------------
+# Maintenance submenu
+# ---------------------------------------------------------------------------
+async def test_maintenance_button_shows_status():
+    chat = FakeChat(ADMIN_GROUP_ID)
+    msg = FakeMessage(chat, 1)
+    update, _ = _callback_update("admin:maintenance", 1, msg)
+
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+
+    assert "⚪ OFF" in msg.replies[-1][0]
+
+
+async def test_maintenance_toggle_turns_on_then_off():
+    chat = FakeChat(ADMIN_GROUP_ID)
+
+    msg1 = FakeMessage(chat, 1)
+    update, _ = _callback_update("admin:maintenance_toggle", 1, msg1)
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+    assert (await settings_store.get_maintenance_state()).enabled is True
+    assert "🟢 ON" in msg1.replies[-1][0]
+
+    msg2 = FakeMessage(chat, 2)
+    update, _ = _callback_update("admin:maintenance_toggle", 1, msg2)
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+    assert (await settings_store.get_maintenance_state()).enabled is False
+    assert "⚪ OFF" in msg2.replies[-1][0]
+
+
+async def test_maintenance_set_message_flow():
+    chat = FakeChat(ADMIN_GROUP_ID)
+    admin = FakeUser(1)
+
+    msg1 = FakeMessage(chat, 1)
+    update, _ = _callback_update("admin:maintenance_set_message", 1, msg1)
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+    assert telegram_bot._admin_state[1] == {"flow": "maintenance_message"}
+
+    text_msg = FakeMessage(chat, 2, text="We'll be back in 30 minutes.", from_user=admin)
+    await telegram_bot.handle_admin_group_message(_message_update(text_msg), FakeContext())
+
+    assert 1 not in telegram_bot._admin_state
+    state = await settings_store.get_maintenance_state()
+    assert state.message == "We'll be back in 30 minutes."
+    assert "updated" in text_msg.replies[-1][0].lower()
+
+
+async def test_maintenance_set_message_rejects_over_limit():
+    chat = FakeChat(ADMIN_GROUP_ID)
+    admin = FakeUser(1)
+    telegram_bot._admin_state[1] = {"flow": "maintenance_message"}
+
+    too_long_msg = FakeMessage(chat, 1, text="x" * 2001, from_user=admin)
+    await telegram_bot.handle_admin_group_message(_message_update(too_long_msg), FakeContext())
+
+    assert 1 not in telegram_bot._admin_state
+    assert "invalid" in too_long_msg.replies[-1][0].lower()
+
+
+async def test_maintenance_back_returns_to_main_menu():
+    chat = FakeChat(ADMIN_GROUP_ID)
+    msg = FakeMessage(chat, 1)
+    update, _ = _callback_update("admin:maintenance_back", 1, msg)
+
+    await telegram_bot.handle_admin_callback(update, FakeContext())
+
+    assert msg.replies[-1][1] == telegram_bot.ADMIN_MAIN_KEYBOARD
