@@ -15,11 +15,13 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 class FakeBot:
-    def __init__(self, fail_copy_for: set[int] | None = None, fail_delete_for: set[int] | None = None):
+    def __init__(self, fail_copy_for: set[int] | None = None, fail_delete_for: set[int] | None = None, fail_pin_for: set[int] | None = None):
         self.fail_copy_for = fail_copy_for or set()
         self.fail_delete_for = fail_delete_for or set()
+        self.fail_pin_for = fail_pin_for or set()
         self.copy_calls: list[tuple[int, object]] = []
         self.delete_calls: list[tuple[int, int]] = []
+        self.pin_calls: list[int] = []
 
     async def copy_message(self, chat_id, from_chat_id, message_id, reply_markup=None):
         self.copy_calls.append((chat_id, reply_markup))
@@ -31,6 +33,11 @@ class FakeBot:
         self.delete_calls.append((chat_id, message_id))
         if chat_id in self.fail_delete_for:
             raise Forbidden("message can't be deleted")
+
+    async def pin_chat_message(self, chat_id, message_id, disable_notification=False):
+        self.pin_calls.append(chat_id)
+        if chat_id in self.fail_pin_for:
+            raise Forbidden("can't pin in this chat")
 
 
 async def _seed_users(*user_ids):
@@ -128,3 +135,36 @@ async def test_send_ad_includes_blocked_users():
 
     assert sent == 2
     assert {c[0] for c in bot.copy_calls} == {1, 2}
+
+
+async def test_send_ad_pins_when_requested():
+    await _seed_users(1, 2)
+    ad_id = await ad_store.create_ad(-100, 42, pinned=True)
+    await ad_store.update_ad_expire_hours(ad_id, 1)
+    bot = FakeBot()
+
+    await ad_service.send_ad(bot, ad_id)
+
+    assert set(bot.pin_calls) == {1, 2}
+
+
+async def test_send_ad_does_not_pin_when_not_requested():
+    await _seed_users(1)
+    ad_id = await ad_store.create_ad(-100, 42, pinned=False)
+    await ad_store.update_ad_expire_hours(ad_id, 1)
+    bot = FakeBot()
+
+    await ad_service.send_ad(bot, ad_id)
+
+    assert bot.pin_calls == []
+
+
+async def test_send_ad_still_counts_as_sent_if_pin_fails():
+    await _seed_users(1)
+    ad_id = await ad_store.create_ad(-100, 42, pinned=True)
+    await ad_store.update_ad_expire_hours(ad_id, 1)
+    bot = FakeBot(fail_pin_for={1})
+
+    sent = await ad_service.send_ad(bot, ad_id)
+
+    assert sent == 1  # copy succeeded; pin failure shouldn't count as delivery failure
