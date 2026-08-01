@@ -75,6 +75,7 @@ class UserInfo:
     first_seen: float | None
     blocked: bool
     blocked_at: float | None
+    privacy_mode: bool
     stats: UserStats
     top_domains: list[DomainCount] = field(default_factory=list)
 
@@ -99,7 +100,9 @@ def _connect() -> sqlite3.Connection:
             first_name TEXT,
             first_seen_at REAL NOT NULL,
             blocked INTEGER NOT NULL DEFAULT 0,
-            blocked_at REAL
+            blocked_at REAL,
+            privacy_mode INTEGER NOT NULL DEFAULT 0,
+            captcha_verified INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -118,6 +121,8 @@ def _connect() -> sqlite3.Connection:
     for statement in (
         "ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN blocked_at REAL",
+        "ALTER TABLE users ADD COLUMN privacy_mode INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN captcha_verified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE link_events ADD COLUMN domain TEXT",
     ):
         try:
@@ -190,6 +195,44 @@ async def block_user(user_id: int) -> None:
 
 async def unblock_user(user_id: int) -> None:
     await asyncio.to_thread(_set_blocked_sync, user_id, False, time.time())
+
+
+def _set_privacy_mode_sync(user_id: int, enabled: bool) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE users SET privacy_mode = ? WHERE user_id = ?", (1 if enabled else 0, user_id))
+
+
+async def set_privacy_mode(user_id: int, enabled: bool) -> None:
+    await asyncio.to_thread(_set_privacy_mode_sync, user_id, enabled)
+
+
+def _is_privacy_mode_enabled_sync(user_id: int) -> bool:
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT privacy_mode FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row[0]) if row else False
+
+
+async def is_privacy_mode_enabled(user_id: int) -> bool:
+    return await asyncio.to_thread(_is_privacy_mode_enabled_sync, user_id)
+
+
+def _set_captcha_verified_sync(user_id: int, verified: bool) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE users SET captcha_verified = ? WHERE user_id = ?", (1 if verified else 0, user_id))
+
+
+async def set_captcha_verified(user_id: int, verified: bool) -> None:
+    await asyncio.to_thread(_set_captcha_verified_sync, user_id, verified)
+
+
+def _is_captcha_verified_sync(user_id: int) -> bool:
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT captcha_verified FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row[0]) if row else False
+
+
+async def is_captcha_verified(user_id: int) -> bool:
+    return await asyncio.to_thread(_is_captcha_verified_sync, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +318,7 @@ def _list_blocked_users_sync() -> list[BlockedUser]:
 def _get_user_row_sync(user_id: int):
     with closing(_connect()) as conn:
         return conn.execute(
-            "SELECT username, first_name, first_seen_at, blocked, blocked_at FROM users WHERE user_id = ?",
+            "SELECT username, first_name, first_seen_at, blocked, blocked_at, privacy_mode FROM users WHERE user_id = ?",
             (user_id,),
         ).fetchone()
 
@@ -337,11 +380,12 @@ async def get_user_info(user_id: int) -> UserInfo:
     if row is None:
         return UserInfo(
             user_id=user_id, username=None, first_name=None, first_seen=None,
-            blocked=False, blocked_at=None, stats=stats, top_domains=top_domains,
+            blocked=False, blocked_at=None, privacy_mode=False, stats=stats, top_domains=top_domains,
         )
 
-    username, first_name, first_seen_at, blocked, blocked_at = row
+    username, first_name, first_seen_at, blocked, blocked_at, privacy_mode = row
     return UserInfo(
         user_id=user_id, username=username, first_name=first_name, first_seen=first_seen_at,
-        blocked=bool(blocked), blocked_at=blocked_at, stats=stats, top_domains=top_domains,
+        blocked=bool(blocked), blocked_at=blocked_at, privacy_mode=bool(privacy_mode),
+        stats=stats, top_domains=top_domains,
     )
