@@ -113,3 +113,15 @@ async def test_get_pending_expiry_ads_only_includes_sent_ads_with_expiry():
     assert draft_ad not in pending_ids
     assert cancelled_ad not in pending_ids
     assert expired_ad not in pending_ids
+
+
+async def test_create_ad_defaults_pinned_false():
+    ad_id = await ad_store.create_ad(-100123, 42)
+    ad = await ad_store.get_ad(ad_id)
+    assert ad.pinned is False
+
+
+async def test_create_ad_with_pinned_true():
+    ad_id = await ad_store.create_ad(-100123, 42, pinned=True)
+    ad = await ad_store.get_ad(ad_id)
+    assert ad.pinned is True
