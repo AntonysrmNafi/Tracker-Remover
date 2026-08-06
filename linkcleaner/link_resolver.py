@@ -169,6 +169,29 @@ def guard_against_authwall(original_url: str, resolved_url: str) -> str:
     return resolved_url
 
 
+FACEBOOK_WARMUP_URL = "https://www.facebook.com/"
+
+
+async def _warm_up_facebook_cookies(client: httpx.AsyncClient, url: str) -> None:
+    """Facebook increasingly login-walls video/reel content for requests
+    that show up with zero prior cookies at all, even when the content is
+    public — a real browser's very first visit already carries a baseline
+    anonymous cookie (e.g. "datr") that Facebook itself set. This does the
+    same anonymous warm-up: one throwaway GET to the Facebook homepage so
+    the client's cookie jar picks up that baseline cookie before the real
+    request. Best-effort — if it fails for any reason, resolution still
+    proceeds without it."""
+    host = (httpx.URL(url).host or "").lower()
+    if not any(host == suffix or host.endswith("." + suffix) for suffix in FACEBOOK_HOST_SUFFIXES):
+        return
+    try:
+        await assert_url_is_safe(FACEBOOK_WARMUP_URL)
+        async with client.stream("GET", FACEBOOK_WARMUP_URL, headers=FACEBOOK_CRAWLER_HEADERS):
+            pass
+    except (UnsafeURLError, httpx.HTTPError) as exc:
+        logger.warning("Facebook cookie warm-up failed (continuing without it): %s", exc)
+
+
 async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None = None) -> str:
     """Follow redirects one hop at a time (SSRF-validated at every hop) and
     return the final destination URL. Falls back to the last known-safe URL
@@ -187,6 +210,7 @@ async def resolve_final_url(url: str, transport: httpx.AsyncBaseTransport | None
             headers=REQUEST_HEADERS,
             transport=transport,
         ) as client:
+            await _warm_up_facebook_cookies(client, url)
             for _ in range(MAX_REDIRECTS + 1):
                 await assert_url_is_safe(current)
                 last_safe = current
